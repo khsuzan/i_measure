@@ -1,4 +1,4 @@
-<img src="logo.png" alt="iMeasure" width="400">
+<img src="logo.jpg" alt="iMeasure" width="400">
 
 # iMeasure
 
