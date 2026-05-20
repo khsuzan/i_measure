@@ -24,8 +24,9 @@ class _MeasureScreenState extends State<MeasureScreen> {
   Vector3? _pointA;
   Vector3? _pointB;
   MeasureState _state = MeasureState.idle;
-  String _statusText = "Tap on a surface to place Point A";
-  String _resultText = "";
+  String _statusText = "Aim crosshair at a surface and tap to place Point A";
+  String _resultCm = "";
+  String _resultFtIn = "";
 
   @override
   void dispose() {
@@ -90,16 +91,22 @@ class _MeasureScreenState extends State<MeasureScreen> {
                       ),
                       textAlign: TextAlign.center,
                     ),
-                    if (_resultText.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        _resultText,
-                        style: const TextStyle(
-                          color: Colors.cyanAccent,
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2,
-                        ),
+                    if (_resultCm.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildValueColumn(_resultCm, "cm"),
+                          ),
+                          Container(
+                            width: 1,
+                            height: 44,
+                            color: Colors.white24,
+                          ),
+                          Expanded(
+                            child: _buildValueColumn(_resultFtIn, "ft / in"),
+                          ),
+                        ],
                       ),
                     ],
                   ],
@@ -134,6 +141,30 @@ class _MeasureScreenState extends State<MeasureScreen> {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildValueColumn(String value, String unit) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.cyanAccent,
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          unit,
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 12,
+          ),
+        ),
+      ],
     );
   }
 
@@ -174,15 +205,15 @@ class _MeasureScreenState extends State<MeasureScreen> {
       _pointA = position;
       setState(() {
         _state = MeasureState.pointASet;
-        _statusText = "Point A set. Tap a surface for Point B.";
+        _statusText = "Point A set. Aim crosshair and tap for Point B.";
       });
     } else if (_state == MeasureState.pointASet) {
       _pointB = position;
       final distance = _pointA!.distanceTo(_pointB!);
-      final cm = distance * 100;
       setState(() {
         _state = MeasureState.complete;
-        _resultText = "${cm.toStringAsFixed(1)} cm";
+        _resultCm = _formatCm(distance);
+        _resultFtIn = _formatFeetInches(distance);
         _statusText = _formatDistance(distance);
       });
     }
@@ -195,13 +226,25 @@ class _MeasureScreenState extends State<MeasureScreen> {
     return "${(meters * 100).toStringAsFixed(1)} cm";
   }
 
+  String _formatCm(double meters) {
+    return (meters * 100).toStringAsFixed(1);
+  }
+
+  String _formatFeetInches(double meters) {
+    final totalInches = meters * 39.3701;
+    final feet = totalInches ~/ 12;
+    final inches = totalInches % 12;
+    return "$feet' ${inches.toStringAsFixed(1)}\"";
+  }
+
   void _reset() {
     setState(() {
       _pointA = null;
       _pointB = null;
       _state = MeasureState.idle;
-      _statusText = "Tap on a surface to place Point A";
-      _resultText = "";
+      _statusText = "Aim crosshair at a surface and tap to place Point A";
+      _resultCm = "";
+      _resultFtIn = "";
     });
   }
 }
