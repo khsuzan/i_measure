@@ -4,8 +4,8 @@ import 'package:arkit_plugin/arkit_plugin.dart';
 import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart' as vector;
 
-enum MeasureMode { line, rectangle }
-enum MeasureState { idle, pointASet, baselineSet, complete }
+enum MeasureMode { line, triangle, rectangle }
+enum MeasureState { idle, pointASet, pointBSet, pointCSet, complete }
 
 class MeasureScreen extends StatefulWidget {
   const MeasureScreen({super.key});
@@ -23,6 +23,7 @@ class _MeasureScreenState extends State<MeasureScreen> {
   vector.Vector3? _pointA;
   vector.Vector3? _pointB;
   vector.Vector3? _pointC;
+  vector.Vector3? _pointD;
   String _statusText = "Aim at a surface and tap +";
   String _resultLabelLine1 = "";
   String _resultValueCm1 = "";
@@ -103,11 +104,11 @@ class _MeasureScreenState extends State<MeasureScreen> {
                     if (_state == MeasureState.idle)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 12),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                        child: Wrap(
+                          spacing: 8,
                           children: [
                             _modeChip(MeasureMode.line, "Line"),
-                            const SizedBox(width: 8),
+                            _modeChip(MeasureMode.triangle, "Triangle"),
                             _modeChip(MeasureMode.rectangle, "Rectangle"),
                           ],
                         ),
@@ -256,18 +257,12 @@ class _MeasureScreenState extends State<MeasureScreen> {
 
   void _updateAtTime(double time) {
     if (_busy) return;
-    if (_state != MeasureState.pointASet &&
-        _state != MeasureState.baselineSet) {
-      return;
-    }
+    if (_state == MeasureState.idle || _state == MeasureState.complete) return;
     _busy = true;
 
     _controller!.performHitTest(x: 0.5, y: 0.5).then((results) {
       _busy = false;
-      if (_state != MeasureState.pointASet &&
-          _state != MeasureState.baselineSet) {
-        return;
-      }
+      if (_state == MeasureState.idle || _state == MeasureState.complete) return;
 
       final hit = _findBestHit(results);
       if (hit == null) return;
@@ -306,26 +301,21 @@ class _MeasureScreenState extends State<MeasureScreen> {
       setState(() {
         _liveDistanceText = _formatDistance(dist);
       });
-    } else if (_state == MeasureState.baselineSet) {
-      final dir = (_pointB! - _pointA!).normalized();
-      final proj = _pointA! + dir * ((pos - _pointA!).dot(dir));
-      final hDir = (pos - proj).normalized();
-      final h = (pos - proj).length;
-      final d = _pointA! + hDir * h;
-      final c = _pointB! + hDir * h;
-
-      _addPreviewDot(d, 0.003);
-      _addPreviewDot(c, 0.003);
-      _addPreviewCylinder(_pointA!, _pointB!, 0.003);
-      _addPreviewCylinder(_pointB!, c, 0.003);
-      _addPreviewCylinder(c, d, 0.003);
-      _addPreviewCylinder(d, _pointA!, 0.003);
-
-      final w = _pointA!.distanceTo(_pointB!);
-      setState(() {
-        _liveDistanceText =
-            "${_formatCm(w)} cm × ${_formatCm(h)} cm";
-      });
+    } else if (_state == MeasureState.pointBSet) {
+      _addPreviewDot(pos, 0.003);
+      _addPreviewCylinder(_pointB!, pos, 0.003);
+      if (_mode == MeasureMode.rectangle || _mode == MeasureMode.triangle) {
+        final ab = _pointA!.distanceTo(_pointB!);
+        final bc = _pointB!.distanceTo(pos);
+        final ca = pos.distanceTo(_pointA!);
+        setState(() {
+          _liveDistanceText = "${_formatCm(ab)} → ${_formatCm(bc)}  |  ${_formatCm(ca)}";
+        });
+      }
+    } else if (_state == MeasureState.pointCSet) {
+      _addPreviewDot(pos, 0.003);
+      _addPreviewCylinder(_pointC!, pos, 0.003);
+      _addPreviewCylinder(pos, _pointA!, 0.003);
     }
   }
 
@@ -405,12 +395,17 @@ class _MeasureScreenState extends State<MeasureScreen> {
         hit.worldTransform.getColumn(3).z,
       );
 
-      if (_state == MeasureState.idle) {
-        _placePointA(pos);
-      } else if (_state == MeasureState.pointASet) {
-        _placePointB(pos);
-      } else if (_state == MeasureState.baselineSet) {
-        _placePointC(pos);
+      switch (_state) {
+        case MeasureState.idle:
+          _placePointA(pos);
+        case MeasureState.pointASet:
+          _placePointB(pos);
+        case MeasureState.pointBSet:
+          _placePointC(pos);
+        case MeasureState.pointCSet:
+          _placePointD(pos);
+        case MeasureState.complete:
+          break;
       }
     });
   }
@@ -422,9 +417,14 @@ class _MeasureScreenState extends State<MeasureScreen> {
 
     setState(() {
       _state = MeasureState.pointASet;
-      _statusText = _mode == MeasureMode.rectangle
-          ? "Tap + for first edge corner"
-          : "Move phone and tap + for Point B";
+      switch (_mode) {
+        case MeasureMode.line:
+          _statusText = "Move phone and tap + for Point B";
+        case MeasureMode.triangle:
+          _statusText = "Tap + for Point B";
+        case MeasureMode.rectangle:
+          _statusText = "Tap + for Point B";
+      }
     });
   }
 
@@ -436,12 +436,7 @@ class _MeasureScreenState extends State<MeasureScreen> {
     _nodeB = _makeDot(position);
     _controller?.add(_nodeB!);
 
-    if (_mode == MeasureMode.rectangle) {
-      setState(() {
-        _state = MeasureState.baselineSet;
-        _statusText = "Move phone and tap + for height";
-      });
-    } else {
+    if (_mode == MeasureMode.line) {
       _addDottedLine(_pointA!, _pointB!);
       final distance = _pointA!.distanceTo(_pointB!);
       setState(() {
@@ -452,6 +447,15 @@ class _MeasureScreenState extends State<MeasureScreen> {
         _statusText = _formatDistance(distance);
         _liveDistanceText = "";
       });
+    } else {
+      _addDottedLine(_pointA!, _pointB!);
+      setState(() {
+        _state = MeasureState.pointBSet;
+        _statusText = _mode == MeasureMode.triangle
+            ? "Tap + for Point C"
+            : "Tap + for Point C";
+        _liveDistanceText = "";
+      });
     }
   }
 
@@ -460,32 +464,84 @@ class _MeasureScreenState extends State<MeasureScreen> {
     _clearPreviewNodes();
     _previewPos = null;
 
-    final dir = (_pointB! - _pointA!).normalized();
-    final proj = _pointA! + dir * ((_pointC! - _pointA!).dot(dir));
-    final hDir = (_pointC! - proj).normalized();
-    final h = (_pointC! - proj).length;
-    final w = _pointA!.distanceTo(_pointB!);
-    final d = _pointA! + hDir * h;
-    final c = _pointB! + hDir * h;
-
-    _nodeC = _makeDot(c);
-    _nodeD = _makeDot(d);
+    _nodeC = _makeDot(position);
     _controller?.add(_nodeC!);
+
+    _addDottedLine(_pointB!, _pointC!);
+
+    if (_mode == MeasureMode.triangle) {
+      _addDottedLine(_pointC!, _pointA!);
+      final area = _triangleArea(_pointA!, _pointB!, _pointC!);
+      final sideA = _pointB!.distanceTo(_pointC!);
+      final sideB = _pointC!.distanceTo(_pointA!);
+      final sideC = _pointA!.distanceTo(_pointB!);
+      final perim = sideA + sideB + sideC;
+      setState(() {
+        _state = MeasureState.complete;
+        _resultLabelLine1 = "Area";
+        _resultValueCm1 = "${_areaCm(area)} cm²";
+        _resultValueFtIn1 = "${_areaSqFt(area)} ft²";
+        _resultLabelLine2 = "Perimeter";
+        _resultValueCm2 = "${_formatCm(perim)} cm";
+        _resultValueFtIn2 = _formatFeetInches(perim);
+        _liveDistanceText = "";
+      });
+    } else {
+      setState(() {
+        _state = MeasureState.pointCSet;
+        _statusText = "Tap + for Point D";
+        _liveDistanceText = "";
+      });
+    }
+  }
+
+  void _placePointD(vector.Vector3 position) {
+    _pointD = position;
+    _clearPreviewNodes();
+    _previewPos = null;
+
+    _nodeD = _makeDot(position);
     _controller?.add(_nodeD!);
 
-    _addRectEdges(_pointA!, _pointB!, c, d);
+    _addDottedLine(_pointC!, _pointD!);
+    _addDottedLine(_pointD!, _pointA!);
+
+    final area = _quadrilateralArea(
+      _pointA!, _pointB!, _pointC!, _pointD!,
+    );
+    final p1 = _pointA!.distanceTo(_pointB!);
+    final p2 = _pointB!.distanceTo(_pointC!);
+    final p3 = _pointC!.distanceTo(_pointD!);
+    final p4 = _pointD!.distanceTo(_pointA!);
+    final perim = p1 + p2 + p3 + p4;
 
     setState(() {
       _state = MeasureState.complete;
-      _resultLabelLine1 = "W";
-      _resultValueCm1 = _formatCm(w);
-      _resultValueFtIn1 = _formatFeetInches(w);
-      _resultLabelLine2 = "H";
-      _resultValueCm2 = _formatCm(h);
-      _resultValueFtIn2 = _formatFeetInches(h);
-      _statusText = "${_formatCm(w)} × ${_formatCm(h)} cm";
+      _resultLabelLine1 = "Area";
+      _resultValueCm1 = "${_areaCm(area)} cm²";
+      _resultValueFtIn1 = "${_areaSqFt(area)} ft²";
+      _resultLabelLine2 = "Perimeter";
+      _resultValueCm2 = "${_formatCm(perim)} cm";
+      _resultValueFtIn2 = _formatFeetInches(perim);
       _liveDistanceText = "";
     });
+  }
+
+  double _triangleArea(
+      vector.Vector3 a, vector.Vector3 b, vector.Vector3 c) {
+    final ab = b - a;
+    final ac = c - a;
+    final cross = ab.cross(ac);
+    return cross.length * 0.5;
+  }
+
+  double _quadrilateralArea(
+    vector.Vector3 a,
+    vector.Vector3 b,
+    vector.Vector3 c,
+    vector.Vector3 d,
+  ) {
+    return _triangleArea(a, b, c) + _triangleArea(a, c, d);
   }
 
   ARKitNode _makeDot(vector.Vector3 position) {
@@ -513,60 +569,6 @@ class _MeasureScreenState extends State<MeasureScreen> {
         a.z + (b.z - a.z) * t,
       );
       final node = ARKitNode(geometry: sphere, position: pos);
-      _controller?.add(node);
-      _lineNodes.add(node);
-    }
-  }
-
-  void _addRectEdges(
-    vector.Vector3 a,
-    vector.Vector3 b,
-    vector.Vector3 c,
-    vector.Vector3 d,
-  ) {
-    final edges = [
-      (a, b),
-      (b, c),
-      (c, d),
-      (d, a),
-    ];
-    for (final (start, end) in edges) {
-      final mid = vector.Vector3(
-        (start.x + end.x) / 2,
-        (start.y + end.y) / 2,
-        (start.z + end.z) / 2,
-      );
-      final dist = start.distanceTo(end);
-      if (dist < 0.001) continue;
-      final dir = (end - start).normalized();
-
-      final from = vector.Vector3(0, 1, 0);
-      final cross = from.cross(dir);
-      vector.Vector4 rotation;
-      if (cross.length < 1e-6) {
-        rotation = from.dot(dir) > 0
-            ? vector.Vector4(0, 0, 0, 0)
-            : vector.Vector4(1, 0, 0, math.pi);
-      } else {
-        final axis = cross.normalized();
-        final angle = math.acos(from.dot(dir).clamp(-1.0, 1.0));
-        rotation = vector.Vector4(axis.x, axis.y, axis.z, angle);
-      }
-
-      final material = ARKitMaterial(
-        diffuse: ARKitMaterialProperty.color(Colors.white.withAlpha(140)),
-        lightingModelName: ARKitLightingModel.constant,
-      );
-      final cylinder = ARKitCylinder(
-        materials: [material],
-        radius: 0.003,
-        height: dist,
-      );
-      final node = ARKitNode(
-        geometry: cylinder,
-        position: mid,
-        rotation: rotation,
-      );
       _controller?.add(node);
       _lineNodes.add(node);
     }
@@ -603,6 +605,7 @@ class _MeasureScreenState extends State<MeasureScreen> {
       _pointA = null;
       _pointB = null;
       _pointC = null;
+      _pointD = null;
       _state = MeasureState.idle;
       _statusText = "Aim at a surface and tap +";
       _resultLabelLine1 = "";
@@ -631,5 +634,13 @@ class _MeasureScreenState extends State<MeasureScreen> {
     final feet = totalInches ~/ 12;
     final inches = totalInches % 12;
     return "$feet' ${inches.toStringAsFixed(1)}\"";
+  }
+
+  String _areaCm(double sqMeters) {
+    return (sqMeters * 10000).toStringAsFixed(1);
+  }
+
+  String _areaSqFt(double sqMeters) {
+    return (sqMeters * 10.7639).toStringAsFixed(1);
   }
 }
