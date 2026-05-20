@@ -1,15 +1,11 @@
-import 'package:flutter/material.dart';
-import 'package:ar_flutter_plugin_plus/ar_flutter_plugin_plus.dart';
-import 'package:ar_flutter_plugin_plus/datatypes/config_planedetection.dart';
-import 'package:ar_flutter_plugin_plus/datatypes/hittest_result_types.dart';
-import 'package:ar_flutter_plugin_plus/managers/ar_session_manager.dart';
-import 'package:ar_flutter_plugin_plus/managers/ar_object_manager.dart';
-import 'package:ar_flutter_plugin_plus/managers/ar_anchor_manager.dart';
-import 'package:ar_flutter_plugin_plus/managers/ar_location_manager.dart';
-import 'package:ar_flutter_plugin_plus/models/ar_hittest_result.dart';
-import 'package:vector_math/vector_math_64.dart' hide Colors;
+import 'dart:math' as math;
 
-enum MeasureState { idle, pointASet, complete }
+import 'package:arkit_plugin/arkit_plugin.dart';
+import 'package:flutter/material.dart';
+import 'package:vector_math/vector_math_64.dart' as vector;
+
+enum MeasureMode { line, rectangle }
+enum MeasureState { idle, pointASet, baselineSet, complete }
 
 class MeasureScreen extends StatefulWidget {
   const MeasureScreen({super.key});
@@ -19,35 +15,56 @@ class MeasureScreen extends StatefulWidget {
 }
 
 class _MeasureScreenState extends State<MeasureScreen> {
-  ARSessionManager? _arSessionManager;
+  ARKitController? _controller;
 
-  Vector3? _pointA;
-  Vector3? _pointB;
+  MeasureMode _mode = MeasureMode.line;
   MeasureState _state = MeasureState.idle;
-  String _statusText = "Aim crosshair at a surface and tap to place Point A";
-  String _resultCm = "";
-  String _resultFtIn = "";
+
+  vector.Vector3? _pointA;
+  vector.Vector3? _pointB;
+  vector.Vector3? _pointC;
+  String _statusText = "Aim at a surface and tap +";
+  String _resultLabelLine1 = "";
+  String _resultValueCm1 = "";
+  String _resultValueFtIn1 = "";
+  String _resultLabelLine2 = "";
+  String _resultValueCm2 = "";
+  String _resultValueFtIn2 = "";
+
+  ARKitNode? _nodeA;
+  ARKitNode? _nodeB;
+  ARKitNode? _nodeC;
+  ARKitNode? _nodeD;
+  final List<ARKitNode> _lineNodes = [];
+  final List<ARKitNode> _previewNodes = [];
+  vector.Vector3? _previewPos;
+  String _liveDistanceText = "";
+  bool _busy = false;
 
   @override
   void dispose() {
-    _arSessionManager?.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final showTwoLines = _resultLabelLine2.isNotEmpty;
+
     return Scaffold(
       body: Stack(
         children: [
-          ARView(
-            onARViewCreated: _onARViewCreated,
-            planeDetectionConfig: PlaneDetectionConfig.horizontalAndVertical,
+          ARKitSceneView(
+            onARKitViewCreated: _onARKitViewCreated,
+            planeDetection: ARPlaneDetection.horizontal,
+            showFeaturePoints: false,
+            enableTapRecognizer: false,
           ),
 
           Center(
             child: Container(
-              width: 20,
-              height: 20,
+              width: 22,
+              height: 22,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: Colors.white.withAlpha(50),
@@ -55,11 +72,11 @@ class _MeasureScreenState extends State<MeasureScreen> {
               ),
               child: Center(
                 child: Container(
-                  width: 4,
-                  height: 4,
+                  width: 5,
+                  height: 5,
                   decoration: const BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.blueAccent,
+                    color: Colors.white,
                   ),
                 ),
               ),
@@ -83,31 +100,43 @@ class _MeasureScreenState extends State<MeasureScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (_state == MeasureState.idle)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            _modeChip(MeasureMode.line, "Line"),
+                            const SizedBox(width: 8),
+                            _modeChip(MeasureMode.rectangle, "Rectangle"),
+                          ],
+                        ),
+                      ),
                     Text(
-                      _statusText,
+                      _liveDistanceText.isNotEmpty
+                          ? _liveDistanceText
+                          : _statusText,
                       style: const TextStyle(
                         color: Colors.white70,
                         fontSize: 14,
                       ),
                       textAlign: TextAlign.center,
                     ),
-                    if (_resultCm.isNotEmpty) ...[
+                    if (_resultValueCm1.isNotEmpty) ...[
                       const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _buildValueColumn(_resultCm, "cm"),
-                          ),
-                          Container(
-                            width: 1,
-                            height: 44,
-                            color: Colors.white24,
-                          ),
-                          Expanded(
-                            child: _buildValueColumn(_resultFtIn, "ft / in"),
-                          ),
-                        ],
+                      _resultRow(
+                        _resultLabelLine1,
+                        _resultValueCm1,
+                        _resultValueFtIn1,
                       ),
+                      if (showTwoLines) ...[
+                        const SizedBox(height: 8),
+                        _resultRow(
+                          _resultLabelLine2,
+                          _resultValueCm2,
+                          _resultValueFtIn2,
+                        ),
+                      ],
                     ],
                   ],
                 ),
@@ -115,108 +144,475 @@ class _MeasureScreenState extends State<MeasureScreen> {
             ),
           ),
 
-          if (_state == MeasureState.complete)
-            Positioned(
-              bottom: 50,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: FilledButton.icon(
-                  onPressed: _reset,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 32,
-                      vertical: 16,
+          Positioned(
+            bottom: 50,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: _state == MeasureState.complete
+                  ? FilledButton.icon(
+                      onPressed: _reset,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 32,
+                          vertical: 16,
+                        ),
+                      ),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text(
+                        "Clear",
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : FloatingActionButton(
+                      onPressed: _addPoint,
+                      backgroundColor: Colors.white,
+                      child: const Icon(
+                        Icons.add,
+                        color: Colors.black,
+                        size: 32,
+                      ),
                     ),
-                  ),
-                  icon: const Icon(Icons.refresh),
-                  label: const Text(
-                    "Measure Again",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
             ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildValueColumn(String value, String unit) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.cyanAccent,
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
+  Widget _modeChip(MeasureMode chipMode, String label) {
+    final selected = _mode == chipMode;
+    return GestureDetector(
+      onTap: selected
+          ? null
+          : () {
+              _reset();
+              setState(() => _mode = chipMode);
+            },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? Colors.white : Colors.white12,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white60,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
           ),
         ),
-        const SizedBox(height: 2),
-        Text(
-          unit,
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 12,
+      ),
+    );
+  }
+
+  Widget _resultRow(String label, String cm, String ftIn) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 50,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.white38, fontSize: 12),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            cm,
+            style: const TextStyle(
+              color: Colors.cyanAccent,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        Container(width: 1, height: 30, color: Colors.white24),
+        Expanded(
+          child: Text(
+            ftIn,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.cyanAccent,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ),
       ],
     );
   }
 
-  void _onARViewCreated(
-    ARSessionManager sessionManager,
-    ARObjectManager arObjMgr,
-    ARAnchorManager arAnchMgr,
-    ARLocationManager arLocMgr,
-  ) {
-    _arSessionManager = sessionManager;
-
-    _arSessionManager!.onInitialize(
-      showFeaturePoints: false,
-      showPlanes: true,
-      handleTaps: true,
-    );
-
-    _arSessionManager!.onPlaneOrPointTap = _onPlaneOrPointTapped;
+  void _onARKitViewCreated(ARKitController controller) {
+    _controller = controller;
+    _controller!.updateAtTime = _updateAtTime;
   }
 
-  Future<void> _onPlaneOrPointTapped(
-    List<ARHitTestResult> hitTestResults,
-  ) async {
-    final planeHits = hitTestResults
-        .where((r) => r.type == ARHitTestResultType.plane)
-        .toList();
+  void _updateAtTime(double time) {
+    if (_busy) return;
+    if (_state != MeasureState.pointASet &&
+        _state != MeasureState.baselineSet) {
+      return;
+    }
+    _busy = true;
 
-    if (planeHits.isEmpty) return;
+    _controller!.performHitTest(x: 0.5, y: 0.5).then((results) {
+      _busy = false;
+      if (_state != MeasureState.pointASet &&
+          _state != MeasureState.baselineSet) {
+        return;
+      }
 
-    final hit = planeHits.first;
-    final position = Vector3(
-      hit.worldTransform.getColumn(3).x,
-      hit.worldTransform.getColumn(3).y,
-      hit.worldTransform.getColumn(3).z,
-    );
+      final hit = _findBestHit(results);
+      if (hit == null) return;
 
-    if (_state == MeasureState.idle) {
-      _pointA = position;
+      final pos = vector.Vector3(
+        hit.worldTransform.getColumn(3).x,
+        hit.worldTransform.getColumn(3).y,
+        hit.worldTransform.getColumn(3).z,
+      );
+
+      _updatePreview(pos);
+    });
+  }
+
+  ARKitTestResult? _findBestHit(List<ARKitTestResult> results) {
+    for (final r in results) {
+      if (r.type == ARKitHitTestResultType.existingPlaneUsingExtent ||
+          r.type == ARKitHitTestResultType.existingPlane ||
+          r.type == ARKitHitTestResultType.featurePoint) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  void _updatePreview(vector.Vector3 pos) {
+    if (_previewPos != null && _previewPos!.distanceTo(pos) < 0.005) return;
+    _previewPos = pos;
+
+    _clearPreviewNodes();
+
+    if (_state == MeasureState.pointASet) {
+      _addPreviewDot(pos, 0.003);
+      _addPreviewCylinder(_pointA!, pos, 0.003);
+      final dist = _pointA!.distanceTo(pos);
       setState(() {
-        _state = MeasureState.pointASet;
-        _statusText = "Point A set. Aim crosshair and tap for Point B.";
+        _liveDistanceText = _formatDistance(dist);
       });
-    } else if (_state == MeasureState.pointASet) {
-      _pointB = position;
+    } else if (_state == MeasureState.baselineSet) {
+      final dir = (_pointB! - _pointA!).normalized();
+      final proj = _pointA! + dir * ((pos - _pointA!).dot(dir));
+      final hDir = (pos - proj).normalized();
+      final h = (pos - proj).length;
+      final d = _pointA! + hDir * h;
+      final c = _pointB! + hDir * h;
+
+      _addPreviewDot(d, 0.003);
+      _addPreviewDot(c, 0.003);
+      _addPreviewCylinder(_pointA!, _pointB!, 0.003);
+      _addPreviewCylinder(_pointB!, c, 0.003);
+      _addPreviewCylinder(c, d, 0.003);
+      _addPreviewCylinder(d, _pointA!, 0.003);
+
+      final w = _pointA!.distanceTo(_pointB!);
+      setState(() {
+        _liveDistanceText =
+            "${_formatCm(w)} cm × ${_formatCm(h)} cm";
+      });
+    }
+  }
+
+  void _clearPreviewNodes() {
+    for (final n in _previewNodes) {
+      _controller?.remove(n.name);
+    }
+    _previewNodes.clear();
+  }
+
+  void _addPreviewDot(vector.Vector3 position, double radius) {
+    final material = ARKitMaterial(
+      diffuse: ARKitMaterialProperty.color(Colors.white.withAlpha(180)),
+      lightingModelName: ARKitLightingModel.constant,
+    );
+    final sphere = ARKitSphere(materials: [material], radius: radius);
+    final node = ARKitNode(geometry: sphere, position: position);
+    _controller?.add(node);
+    _previewNodes.add(node);
+  }
+
+  void _addPreviewCylinder(
+      vector.Vector3 a, vector.Vector3 b, double radius) {
+    final mid = vector.Vector3(
+      (a.x + b.x) / 2,
+      (a.y + b.y) / 2,
+      (a.z + b.z) / 2,
+    );
+    final dist = a.distanceTo(b);
+    if (dist < 0.001) return;
+    final dir = (b - a).normalized();
+
+    final from = vector.Vector3(0, 1, 0);
+    final cross = from.cross(dir);
+    vector.Vector4 rotation;
+    if (cross.length < 1e-6) {
+      rotation = from.dot(dir) > 0
+          ? vector.Vector4(0, 0, 0, 0)
+          : vector.Vector4(1, 0, 0, math.pi);
+    } else {
+      final axis = cross.normalized();
+      final angle = math.acos(from.dot(dir).clamp(-1.0, 1.0));
+      rotation = vector.Vector4(axis.x, axis.y, axis.z, angle);
+    }
+
+    final material = ARKitMaterial(
+      diffuse: ARKitMaterialProperty.color(Colors.white.withAlpha(120)),
+      lightingModelName: ARKitLightingModel.constant,
+    );
+    final cylinder = ARKitCylinder(
+      materials: [material],
+      radius: radius,
+      height: dist,
+    );
+    final node = ARKitNode(
+      geometry: cylinder,
+      position: mid,
+      rotation: rotation,
+    );
+    _controller?.add(node);
+    _previewNodes.add(node);
+  }
+
+  void _addPoint() {
+    if (_busy) return;
+    _busy = true;
+
+    _controller!.performHitTest(x: 0.5, y: 0.5).then((results) {
+      _busy = false;
+
+      final hit = _findBestHit(results);
+      if (hit == null) return;
+
+      final pos = vector.Vector3(
+        hit.worldTransform.getColumn(3).x,
+        hit.worldTransform.getColumn(3).y,
+        hit.worldTransform.getColumn(3).z,
+      );
+
+      if (_state == MeasureState.idle) {
+        _placePointA(pos);
+      } else if (_state == MeasureState.pointASet) {
+        _placePointB(pos);
+      } else if (_state == MeasureState.baselineSet) {
+        _placePointC(pos);
+      }
+    });
+  }
+
+  void _placePointA(vector.Vector3 position) {
+    _pointA = position;
+    _nodeA = _makeDot(position);
+    _controller?.add(_nodeA!);
+
+    setState(() {
+      _state = MeasureState.pointASet;
+      _statusText = _mode == MeasureMode.rectangle
+          ? "Tap + for first edge corner"
+          : "Move phone and tap + for Point B";
+    });
+  }
+
+  void _placePointB(vector.Vector3 position) {
+    _pointB = position;
+    _clearPreviewNodes();
+    _previewPos = null;
+
+    _nodeB = _makeDot(position);
+    _controller?.add(_nodeB!);
+
+    if (_mode == MeasureMode.rectangle) {
+      setState(() {
+        _state = MeasureState.baselineSet;
+        _statusText = "Move phone and tap + for height";
+      });
+    } else {
+      _addDottedLine(_pointA!, _pointB!);
       final distance = _pointA!.distanceTo(_pointB!);
       setState(() {
         _state = MeasureState.complete;
-        _resultCm = _formatCm(distance);
-        _resultFtIn = _formatFeetInches(distance);
+        _resultLabelLine1 = "";
+        _resultValueCm1 = _formatCm(distance);
+        _resultValueFtIn1 = _formatFeetInches(distance);
         _statusText = _formatDistance(distance);
+        _liveDistanceText = "";
       });
     }
+  }
+
+  void _placePointC(vector.Vector3 position) {
+    _pointC = position;
+    _clearPreviewNodes();
+    _previewPos = null;
+
+    final dir = (_pointB! - _pointA!).normalized();
+    final proj = _pointA! + dir * ((_pointC! - _pointA!).dot(dir));
+    final hDir = (_pointC! - proj).normalized();
+    final h = (_pointC! - proj).length;
+    final w = _pointA!.distanceTo(_pointB!);
+    final d = _pointA! + hDir * h;
+    final c = _pointB! + hDir * h;
+
+    _nodeC = _makeDot(c);
+    _nodeD = _makeDot(d);
+    _controller?.add(_nodeC!);
+    _controller?.add(_nodeD!);
+
+    _addRectEdges(_pointA!, _pointB!, c, d);
+
+    setState(() {
+      _state = MeasureState.complete;
+      _resultLabelLine1 = "W";
+      _resultValueCm1 = _formatCm(w);
+      _resultValueFtIn1 = _formatFeetInches(w);
+      _resultLabelLine2 = "H";
+      _resultValueCm2 = _formatCm(h);
+      _resultValueFtIn2 = _formatFeetInches(h);
+      _statusText = "${_formatCm(w)} × ${_formatCm(h)} cm";
+      _liveDistanceText = "";
+    });
+  }
+
+  ARKitNode _makeDot(vector.Vector3 position) {
+    final material = ARKitMaterial(
+      diffuse: ARKitMaterialProperty.color(Colors.white),
+      lightingModelName: ARKitLightingModel.constant,
+    );
+    final sphere = ARKitSphere(materials: [material], radius: 0.00345);
+    return ARKitNode(geometry: sphere, position: position);
+  }
+
+  void _addDottedLine(vector.Vector3 a, vector.Vector3 b) {
+    const segments = 20;
+    final material = ARKitMaterial(
+      diffuse: ARKitMaterialProperty.color(Colors.white.withAlpha(160)),
+      lightingModelName: ARKitLightingModel.constant,
+    );
+    final sphere = ARKitSphere(materials: [material], radius: 0.003);
+
+    for (int i = 1; i < segments; i++) {
+      final t = i / segments;
+      final pos = vector.Vector3(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+      );
+      final node = ARKitNode(geometry: sphere, position: pos);
+      _controller?.add(node);
+      _lineNodes.add(node);
+    }
+  }
+
+  void _addRectEdges(
+    vector.Vector3 a,
+    vector.Vector3 b,
+    vector.Vector3 c,
+    vector.Vector3 d,
+  ) {
+    final edges = [
+      (a, b),
+      (b, c),
+      (c, d),
+      (d, a),
+    ];
+    for (final (start, end) in edges) {
+      final mid = vector.Vector3(
+        (start.x + end.x) / 2,
+        (start.y + end.y) / 2,
+        (start.z + end.z) / 2,
+      );
+      final dist = start.distanceTo(end);
+      if (dist < 0.001) continue;
+      final dir = (end - start).normalized();
+
+      final from = vector.Vector3(0, 1, 0);
+      final cross = from.cross(dir);
+      vector.Vector4 rotation;
+      if (cross.length < 1e-6) {
+        rotation = from.dot(dir) > 0
+            ? vector.Vector4(0, 0, 0, 0)
+            : vector.Vector4(1, 0, 0, math.pi);
+      } else {
+        final axis = cross.normalized();
+        final angle = math.acos(from.dot(dir).clamp(-1.0, 1.0));
+        rotation = vector.Vector4(axis.x, axis.y, axis.z, angle);
+      }
+
+      final material = ARKitMaterial(
+        diffuse: ARKitMaterialProperty.color(Colors.white.withAlpha(140)),
+        lightingModelName: ARKitLightingModel.constant,
+      );
+      final cylinder = ARKitCylinder(
+        materials: [material],
+        radius: 0.003,
+        height: dist,
+      );
+      final node = ARKitNode(
+        geometry: cylinder,
+        position: mid,
+        rotation: rotation,
+      );
+      _controller?.add(node);
+      _lineNodes.add(node);
+    }
+  }
+
+  void _removeAllNodes() {
+    _clearPreviewNodes();
+    if (_nodeA != null) {
+      _controller?.remove(_nodeA!.name);
+      _nodeA = null;
+    }
+    if (_nodeB != null) {
+      _controller?.remove(_nodeB!.name);
+      _nodeB = null;
+    }
+    if (_nodeC != null) {
+      _controller?.remove(_nodeC!.name);
+      _nodeC = null;
+    }
+    if (_nodeD != null) {
+      _controller?.remove(_nodeD!.name);
+      _nodeD = null;
+    }
+    for (final n in _lineNodes) {
+      _controller?.remove(n.name);
+    }
+    _lineNodes.clear();
+    _previewPos = null;
+  }
+
+  void _reset() {
+    _removeAllNodes();
+    setState(() {
+      _pointA = null;
+      _pointB = null;
+      _pointC = null;
+      _state = MeasureState.idle;
+      _statusText = "Aim at a surface and tap +";
+      _resultLabelLine1 = "";
+      _resultValueCm1 = "";
+      _resultValueFtIn1 = "";
+      _resultLabelLine2 = "";
+      _resultValueCm2 = "";
+      _resultValueFtIn2 = "";
+      _liveDistanceText = "";
+    });
   }
 
   String _formatDistance(double meters) {
@@ -235,16 +631,5 @@ class _MeasureScreenState extends State<MeasureScreen> {
     final feet = totalInches ~/ 12;
     final inches = totalInches % 12;
     return "$feet' ${inches.toStringAsFixed(1)}\"";
-  }
-
-  void _reset() {
-    setState(() {
-      _pointA = null;
-      _pointB = null;
-      _state = MeasureState.idle;
-      _statusText = "Aim crosshair at a surface and tap to place Point A";
-      _resultCm = "";
-      _resultFtIn = "";
-    });
   }
 }
